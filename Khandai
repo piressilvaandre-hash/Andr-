@@ -1,0 +1,259 @@
+
+ // ==UserScript==
+ // @name         Khan Academy - Assistente de Matemática
+ // @namespace    local.math.helper
+ // @version      1.0.0
+ // @description  Detecta e resolve operações matemáticas simples.
+ // @match        https://*.khanacademy.org/*
+ // @match        https://khanacademy.org/*
+ // @grant        none
+ // ==/UserScript==
+
+(() => {
+  "use strict";
+
+  // Evita criar o painel mais de uma vez.
+  if (window.__mathHelperLoaded) return;
+  window.__mathHelperLoaded = true;
+
+  const MAX_EXPRESSIONS = 15;
+  const MAX_LENGTH = 100;
+  let lastResults = [];
+
+  // -------------------------------
+  // 1. Calculadora segura
+  // Não utiliza eval() nem Function().
+  // -------------------------------
+
+  function calculate(expression) {
+    const tokens = expression.match(
+      /\d+(?:\.\d+)?|[()+\-*/^]/g
+    );
+
+    if (!tokens || tokens.join("") !== expression.replace(/\s/g, "")) {
+      throw new Error("Expressão inválida");
+    }
+
+    let pos = 0;
+
+    function primary() {
+      const token = tokens[pos++];
+
+      if (token === "+") return primary();
+      if (token === "-") return -primary();
+
+      if (token === "(") {
+        const value = addSub();
+        if (tokens[pos++] !== ")") {
+          throw new Error("Parênteses inválidos");
+        }
+        return value;
+      }
+
+      if (!token || !/^\d+(\.\d+)?$/.test(token)) {
+        throw new Error("Número esperado");
+      }
+
+      return Number(token);
+    }
+
+    function power() {
+      let value = primary();
+      if (tokens[pos] === "^") {
+        pos++;
+        value = Math.pow(value, power());
+      }
+      return value;
+    }
+
+    function multiplyDivide() {
+      let value = power();
+
+      while (tokens[pos] === "*" || tokens[pos] === "/") {
+        const op = tokens[pos++];
+        const right = power();
+
+        if (op === "/" && right === 0) {
+          throw new Error("Divisão por zero");
+        }
+
+        value = op === "*" ? value * right : value / right;
+      }
+
+      return value;
+    }
+
+    function addSub() {
+      let value = multiplyDivide();
+
+      while (tokens[pos] === "+" || tokens[pos] === "-") {
+        const op = tokens[pos++];
+        const right = multiplyDivide();
+        value = op === "+" ? value + right : value - right;
+      }
+
+      return value;
+    }
+
+    const result = addSub();
+
+    if (pos !== tokens.length || !Number.isFinite(result)) {
+      throw new Error("Expressão não suportada");
+    }
+
+    return result;
+  }
+
+  // -------------------------------
+  // 2. Localiza expressões no texto
+  // Exemplos: 12 + 8, 7 * 6, (10 - 2) / 4
+  // -------------------------------
+
+  function findExpressions(text) {
+    const found = [];
+    const pattern =
+      /(?:\d+(?:\.\d+)?\s*)[+\-*/^](?:\s*\d+(?:\.\d+)?|\s*\()/g;
+
+    // Procura também expressões entre parênteses.
+    const candidates = text.match(pattern) || [];
+
+    for (const candidate of candidates) {
+      const expr = candidate.trim();
+
+      if (expr.length > MAX_LENGTH) continue;
+
+      try {
+        const answer = calculate(expr);
+        found.push({ expr, answer });
+      } catch (_) {
+        // Ignora expressões que não podem ser resolvidas.
+      }
+    }
+
+    // Remove resultados repetidos.
+    return [...new Map(
+      found.map(item => [
+        item.expr + "=" + item.answer,
+        item
+      ])
+    ).values()].slice(0, MAX_EXPRESSIONS);
+  }
+
+  // -------------------------------
+  // 3. Cria o painel flutuante
+  // -------------------------------
+
+  const panel = document.createElement("section");
+
+  Object.assign(panel.style, {
+    position: "fixed",
+    right: "16px",
+    bottom: "16px",
+    width: "310px",
+    maxHeight: "55vh",
+    overflowY: "auto",
+    zIndex: "2147483647",
+    background: "#181818",
+    color: "#ffffff",
+    border: "1px solid #555",
+    borderRadius: "12px",
+    padding: "14px",
+    font: "14px Arial, sans-serif",
+    boxShadow: "0 4px 20px #0008"
+  });
+
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;
+                align-items:center;gap:8px">
+      <strong>Assistente de Matemática</strong>
+      <button id="mh-close" aria-label="Fechar">✕</button>
+    </div>
+
+    <p id="mh-status">Analisando a página...</p>
+    <div id="mh-results"></div>
+
+    <button id="mh-refresh" style="margin-top:10px">
+      Analisar novamente
+    </button>
+
+    <p style="font-size:11px;color:#bbb">
+      Resultados automáticos podem conter erros.
+      Confira cada cálculo.
+    </p>
+  `;
+
+  document.body.appendChild(panel);
+
+  const status = panel.querySelector("#mh-status");
+  const results = panel.querySelector("#mh-results");
+
+  panel.querySelector("#mh-close").onclick = () => {
+    panel.remove();
+  };
+
+  // -------------------------------
+  // 4. Analisa o conteúdo visível
+  // -------------------------------
+
+  function scanPage() {
+    if (!document.body.contains(panel)) return;
+
+    // Evita incluir o próprio painel na pesquisa.
+    const clone = document.body.cloneNode(true);
+    const ownPanel = clone.querySelector(
+      'section[style*="2147483647"]'
+    );
+    if (ownPanel) ownPanel.remove();
+
+    const pageText = (clone.innerText || "").slice(0, 50000);
+    lastResults = findExpressions(pageText);
+
+    results.replaceChildren();
+
+    if (!lastResults.length) {
+      status.textContent =
+        "Nenhuma operação simples identificada.";
+      return;
+    }
+
+    status.textContent =
+      `${lastResults.length} operação(ões) encontrada(s):`;
+
+    for (const item of lastResults) {
+      const line = document.createElement("div");
+
+      Object.assign(line.style, {
+        padding: "8px 0",
+        borderBottom: "1px solid #444",
+        overflowWrap: "anywhere"
+      });
+
+      const expression = document.createElement("div");
+      expression.textContent = item.expr;
+
+      const answer = document.createElement("strong");
+      answer.textContent = "= " + item.answer;
+
+      line.append(expression, answer);
+      results.appendChild(line);
+    }
+  }
+
+  panel.querySelector("#mh-refresh").onclick = scanPage;
+
+  // Analisa a página inicialmente.
+  scanPage();
+
+  // Detecta alterações dinâmicas no conteúdo.
+  let timer;
+  const observer = new MutationObserver(() => {
+    clearTimeout(timer);
+    timer = setTimeout(scanPage, 800);
+  });
+
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+
+})();
